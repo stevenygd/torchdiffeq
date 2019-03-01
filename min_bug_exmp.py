@@ -1,10 +1,18 @@
 import math
+import random
 import tqdm
 import torch
 import torch.nn as nn
+import numpy as np
+
+seed=38383
+random.seed(seed)
+np.random.seed(seed)
+torch.manual_seed(seed)
+torch.cuda.manual_seed(seed)
+torch.cuda.manual_seed_all(seed)
+
 from torchdiffeq import odeint_adjoint as odeint
-
-
 def logStdNorm(z):
     dim = z.size(-1)
     logZ = -0.5 * dim * math.log(2 * math.pi)
