@@ -19,15 +19,16 @@ def logStdNorm(z):
     return logZ - z.pow(2) / 2
 
 
-class E(nn.Module):
+# class E(nn.Module):
+#
+#     def __init__(self, cdim=128):
+#         super(E, self).__init__()
+#         self.fc = nn.Linear(3, cdim)
+#
+#     def forward(self, x):
+#         return self.fc(x).mean(dim=1)
 
-    def __init__(self, cdim=128):
-        super(E, self).__init__()
-        self.fc = nn.Linear(3, cdim)
-
-    def forward(self, x):
-        return self.fc(x).mean(dim=1)
-
+from pointnet import L3DPPointNetEncoder as E
 
 class F(nn.Module):
 
@@ -91,6 +92,9 @@ class ODENetCond(nn.Module):
         self.odef = odef
         self.e_ = None
 
+    def reset_count(self):
+        self.cnt = 0
+
     def forward(self, t, states):
         x, logp, c = states[0], states[1], states[2]
         with torch.set_grad_enabled(True):
@@ -101,6 +105,7 @@ class ODENetCond(nn.Module):
             if self.e_ is None:
                 self.e_ = torch.randn_like(ret).to(x)
             approx_tr = divergence(ret, x, self.e_).view(logp.size())
+        self.cnt += 1
         return [ret, -approx_tr, torch.zeros_like(c, requires_grad=True)]
 
 
@@ -110,6 +115,10 @@ class ODENet(nn.Module):
         super(ODENet, self).__init__()
         self.odef = odef
         self.e_ = None
+        self.cnt = 0
+
+    def reset_count(self):
+        self.cnt = 0
 
     def forward(self, t, states):
         x, logp = states[0], states[1]
@@ -120,6 +129,7 @@ class ODENet(nn.Module):
             if self.e_ is None:
                 self.e_ = torch.randn_like(ret).to(x)
             approx_tr = divergence(ret, x, self.e_).view(logp.size())
+        self.cnt += 1
         return [ret, -approx_tr]
 
 
@@ -128,17 +138,27 @@ class Trainer(nn.Module):
     def __init__(self):
         super(Trainer, self).__init__()
 
-        self.enc = E()
+        cdim = 128
+        self.enc = E(cdim=cdim)
         # ODE1
-        self.f1 = F()
+        self.f1 = F(cdim=cdim)
         self.ode1 = ODENet(self.f1)
         self.t1 = torch.tensor([0., 1.])
 
         # ODE2
-        self.f2 = FCond()
+        self.f2 = FCond(cdim=cdim)
         self.ode2 = ODENetCond(self.f2)
         self.t2 = torch.tensor([0., 1.])
 
+    def reset_cnt(self):
+        self.ode1.reset_count()
+        self.ode2.reset_count()
+
+    def print_cnt(self):
+        print("ODE1:%d ODE2:%d"%(self.ode1.cnt, self.ode2.cnt))
+
+    def get_cnt(self):
+        return self.ode1.cnt, self.ode2.cnt
 
     def forward(self, inp):
 
@@ -149,14 +169,26 @@ class Trainer(nn.Module):
         logpx = torch.zeros(list(inp.size()[:-1])+[1]).to(inp)
         y2, lp2, _ = odeint(self.ode2, (inp, logpx, c), self.t2)
 
+        # loss = (logStdNorm(y1) + lp1).mean() + (logStdNorm(y2) + lp2).mean()
         loss = (logStdNorm(y1) + lp1).mean() + (logStdNorm(y2) + lp2).mean()
+        # loss = (logStdNorm(y1) + lp1).mean()
         return loss
 
 model = Trainer().cuda()
 optimizer = torch.optim.Adam(model.parameters(), lr = 0.0001)
-for _ in tqdm.trange(1000):
-    inp = torch.rand(5,7,3).cuda()
-    loss = model(inp)
-    loss.backward()
-    optimizer.step()
 
+pbar = tqdm.trange(1000)
+for _ in pbar:
+    inp = torch.rand(5,7,3).cuda()
+
+    model.reset_cnt()
+    loss = model(inp)
+    forward_cnt1, forward_cnt2 = model.get_cnt()
+
+    model.reset_cnt()
+    loss.backward()
+    backward_cnt1, backward_cnt2 = model.get_cnt()
+
+    optimizer.step()
+    pbar.set_description("Fore: %d %d, Back: %d %d"\
+            %(forward_cnt1, forward_cnt2, backward_cnt1, backward_cnt2))
